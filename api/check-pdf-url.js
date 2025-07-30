@@ -5,7 +5,7 @@ import axios from 'axios';
 export default async function handler(req, res) {
   // 🔥 Habilitar CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   // Si es una preflight request (OPTIONS), respondé sin lógica
