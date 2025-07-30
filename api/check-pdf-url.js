@@ -3,6 +3,15 @@ dotenv.config();
 import axios from 'axios';
 
 export default async function handler(req, res) {
+  // 🔥 Habilitar CORS
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  // Si es una preflight request (OPTIONS), respondé sin lógica
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
   const { email, urlPerfil } = req.query;
 
   if (!email || !urlPerfil) {
