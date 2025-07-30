@@ -3,44 +3,61 @@ dotenv.config();
 import axios from 'axios';
 
 export default async function handler(req, res) {
-  const { email } = req.query;
+  const { email, urlPerfil } = req.query;
+
+  if (!email || !urlPerfil) {
+    return res.status(400).json({ success: false, error: 'Faltan parámetros: email y urlPerfil son requeridos.' });
+  }
+
   const token = process.env.AIRTABLE_TOKEN;
   const base = process.env.AIRTABLE_BASE_ID;
   const table = process.env.AIRTABLE_TABLE_NAME;
 
-  if (!email) {
-    return res.status(400).json({ error: 'Email is required in query string' });
-  }
   if (!token || !base || !table) {
-    return res.status(500).json({ error: 'Missing Airtable configuration variables' });
+    return res.status(500).json({ success: false, error: 'Faltan variables de entorno de Airtable' });
   }
 
   try {
     const url = `https://api.airtable.com/v0/${base}/${encodeURIComponent(table)}`;
-
     const response = await axios.get(url, {
       headers: {
         Authorization: `Bearer ${token}`
       },
       params: {
         filterByFormula: `{UsuarioEmail} = '${email}'`,
-        maxRecords: 1
+        pageSize: 10
       }
     });
 
-    const record = response.data.records[0];
+    const perfilActual = urlPerfil.split('?')[0]?.replace(/\/+$/, '');
 
-    if (!record) {
-      return res.status(404).json({ error: 'No record found with that email' });
+    const matched = response.data.records.find(r => {
+      const perfilAirtable = r.fields?.URLPerfil?.split('?')[0]?.replace(/\/+$/, '');
+      return (
+        r.fields?.UsuarioEmail === email &&
+        perfilAirtable === perfilActual &&
+        r.fields?.URL_informePDF?.startsWith("http")
+      );
+    });
+
+    if (!matched) {
+      return res.status(200).json({ success: false, found: false });
     }
 
-    const pdfUrl = record.fields.URL_informePDF || null;
+    let pdfUrl = matched.fields.URL_informePDF;
 
-    return res.status(200).json({ url: pdfUrl });
+    if (pdfUrl.includes("drive.google.com") && pdfUrl.includes("/file/d/")) {
+      const idMatch = pdfUrl.match(/\/d\/([^/]+)\//);
+      if (idMatch?.[1]) {
+        pdfUrl = `https://drive.google.com/file/d/${idMatch[1]}/preview`;
+      }
+    }
 
-  } catch (error) {
-    const status = error.response?.status || 500;
-    const message = error.response?.data?.error?.message || error.message;
-    return res.status(status).json({ error: 'Error al consultar Airtable', details: message });
+    return res.status(200).json({ success: true, found: true, pdfURL: pdfUrl });
+
+  } catch (err) {
+    const status = err.response?.status || 500;
+    const message = err.response?.data?.error?.message || err.message;
+    return res.status(status).json({ success: false, error: 'Error consultando Airtable', details: message });
   }
 }
