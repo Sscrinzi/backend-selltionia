@@ -64,7 +64,6 @@ function extractDriveFileId(u) {
 function toDrivePreview(u) {
   const id = extractDriveFileId(u);
   if (id) return `https://drive.google.com/file/d/${id}/preview`;
-  // /view → /preview
   if (/drive\.google\.com\/.*\/view(\?|$)/.test(String(u || ''))) {
     return String(u).replace('/view', '/preview');
   }
@@ -102,7 +101,7 @@ export default async function handler(req, res) {
   try {
     const perfilNormalizado = normalizeProfileUrl(urlPerfilRaw);
 
-    // Traemos registros del usuario (hasta 100) y ordenamos por createdTime desc en Node
+    // Traemos registros (hasta 100) por email y ordenamos por createdTime desc
     let records = await table
       .select({
         filterByFormula: `{UsuarioEmail} = '${email}'`,
@@ -117,19 +116,32 @@ export default async function handler(req, res) {
       return tb - ta;
     });
 
-    // Filtramos por URL de perfil normalizada e items con link
-    const candidates = records.filter((r) => {
-      const urlAir = normalizeProfileUrl(r.get('URLPerfil') || '');
+    // Clasificamos por coincidencia de URL
+    const withLink = records.filter(r => {
       const link = r.get('URL_informePDF');
-      return urlAir === perfilNormalizado && typeof link === 'string' && link.startsWith('http');
+      return typeof link === 'string' && link.startsWith('http');
     });
 
-    // Elegimos primero el que sea ARCHIVO (no carpeta) y que parezca PDF/archivo de Drive
+    const isStrict = (r) => normalizeProfileUrl(r.get('URLPerfil') || '') === perfilNormalizado;
+    const isLoose  = (r) => {
+      const urlAir = normalizeProfileUrl(r.get('URLPerfil') || '');
+      return urlAir.startsWith(perfilNormalizado) || perfilNormalizado.startsWith(urlAir);
+    };
+
+    const strict = withLink.filter(isStrict);
+    const loose  = withLink.filter(isLoose);
+
+    const isFileLink = (link) =>
+      !isDriveFolder(link) && (extractDriveFileId(link) || String(link).toLowerCase().endsWith('.pdf'));
+
+    const pickFile = (list) => list.find(r => isFileLink(r.get('URL_informePDF')));
+
+    // Orden de preferencia: strict-file > loose-file > cualquier-file > strict-cualquiera > loose-cualquiera > cualquiera
     const best =
-      candidates.find((r) => {
-        const link = r.get('URL_informePDF');
-        return !isDriveFolder(link) && (extractDriveFileId(link) || link.toLowerCase().endsWith('.pdf'));
-      }) || candidates[0];
+      pickFile(strict) ||
+      pickFile(loose)  ||
+      pickFile(withLink) ||
+      strict[0] || loose[0] || withLink[0];
 
     if (!best) {
       console.log(`📝 No se encontró PDF para: ${email} | ${perfilNormalizado}`);
@@ -141,17 +153,20 @@ export default async function handler(req, res) {
       });
     }
 
-    let pdfUrl = best.get('URL_informePDF');
+    let link = best.get('URL_informePDF');
+    const drivePreview = toDrivePreview(link);
+    if (drivePreview) link = drivePreview;
 
-    // Normaliza cualquier enlace de Drive a /preview si es archivo
-    const drivePreview = toDrivePreview(pdfUrl);
-    if (drivePreview) pdfUrl = drivePreview;
+    const kind = isDriveFolder(link) ? 'folder'
+               : (extractDriveFileId(link) || String(link).toLowerCase().endsWith('.pdf')) ? 'file'
+               : 'unknown';
 
-    console.log(`✅ PDF encontrado: ${pdfUrl}`);
+    console.log(`✅ PDF encontrado (${kind}): ${link}`);
     return res.status(200).json({
       success: true,
       found: true,
-      urlPDF: pdfUrl,
+      urlPDF: link,
+      driveKind: kind,
       recordId: best.id,
     });
   } catch (err) {
