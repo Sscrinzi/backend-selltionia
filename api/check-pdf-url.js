@@ -22,10 +22,9 @@ function applyCORS(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
   res.setHeader('Access-Control-Max-Age', '86400');
-  // res.setHeader('Access-Control-Allow-Credentials', 'true'); // solo si usas cookies
 
   if (req.method === 'OPTIONS') {
-    res.status(204).end(); // preflight OK
+    res.status(204).end();
     return true;
   }
   return false;
@@ -53,10 +52,32 @@ function ensureEnv() {
   return { apiKey, baseId, tableName };
 }
 
+/* ── Helpers Drive ────────────────────────────────────────────────────── */
+function extractDriveFileId(u) {
+  const s = String(u || '');
+  let m = s.match(/\/file\/d\/([^/]+)/);
+  if (m?.[1]) return m[1];
+  m = s.match(/[?&]id=([^&]+)/); // open?id=..., uc?id=...
+  if (m?.[1]) return m[1];
+  return null;
+}
+function toDrivePreview(u) {
+  const id = extractDriveFileId(u);
+  if (id) return `https://drive.google.com/file/d/${id}/preview`;
+  // /view → /preview
+  if (/drive\.google\.com\/.*\/view(\?|$)/.test(String(u || ''))) {
+    return String(u).replace('/view', '/preview');
+  }
+  return null;
+}
+function isDriveFolder(u) {
+  return /drive\.google\.com\/(drive\/folders|folders|folder\/d)\//.test(String(u || ''));
+}
+/* ─────────────────────────────────────────────────────────────────────── */
+
 export default async function handler(req, res) {
   if (applyCORS(req, res)) return;
 
-  // ✅ Solo POST con JSON
   if (req.method !== 'POST') {
     return res.status(405).json({ success: false, error: 'Método no permitido. Usa POST con JSON.' });
   }
@@ -68,12 +89,11 @@ export default async function handler(req, res) {
     return res.status(400).json({ success: false, error: 'Faltan parámetros: email y urlPerfil.' });
   }
 
-  // ✅ INICIALIZACIÓN CORRECTA (tabla directa)
   let table;
   try {
     const { apiKey, baseId, tableName } = ensureEnv();
     const airtable = new Airtable({ apiKey });
-    table = airtable.base(baseId)(tableName); // ← obtenemos directamente la tabla
+    table = airtable.base(baseId)(tableName);
   } catch (e) {
     console.error('❌ Env error:', e.message);
     return res.status(500).json({ success: false, error: 'Configuración del servidor incompleta' });
@@ -82,32 +102,36 @@ export default async function handler(req, res) {
   try {
     const perfilNormalizado = normalizeProfileUrl(urlPerfilRaw);
 
-    // Filtramos por email en Airtable y luego matcheamos URL normalizada
-    const records = await table
+    // Traemos registros del usuario (hasta 100) y ordenamos por createdTime desc en Node
+    let records = await table
       .select({
         filterByFormula: `{UsuarioEmail} = '${email}'`,
         fields: ['UsuarioEmail', 'URLPerfil', 'URL_informePDF'],
-        pageSize: 25,
+        pageSize: 100
       })
       .all();
 
-    const match = records.find((r) => {
-      const urlAir = normalizeProfileUrl(r.get('URLPerfil') || '');
-      const hasPdf = typeof r.get('URL_informePDF') === 'string' && r.get('URL_informePDF').startsWith('http');
-      return hasPdf && urlAir === perfilNormalizado;
+    records.sort((a, b) => {
+      const ta = new Date(a._rawJson?.createdTime || 0).getTime();
+      const tb = new Date(b._rawJson?.createdTime || 0).getTime();
+      return tb - ta;
     });
 
-    const matchLoose = match
-      ? match
-      : records.find((r) => {
-          const urlAir = normalizeProfileUrl(r.get('URLPerfil') || '');
-          const hasPdf = typeof r.get('URL_informePDF') === 'string' && r.get('URL_informePDF').startsWith('http');
-          return hasPdf && (urlAir.startsWith(perfilNormalizado) || perfilNormalizado.startsWith(urlAir));
-        });
+    // Filtramos por URL de perfil normalizada e items con link
+    const candidates = records.filter((r) => {
+      const urlAir = normalizeProfileUrl(r.get('URLPerfil') || '');
+      const link = r.get('URL_informePDF');
+      return urlAir === perfilNormalizado && typeof link === 'string' && link.startsWith('http');
+    });
 
-    const foundRecord = match || matchLoose;
+    // Elegimos primero el que sea ARCHIVO (no carpeta) y que parezca PDF/archivo de Drive
+    const best =
+      candidates.find((r) => {
+        const link = r.get('URL_informePDF');
+        return !isDriveFolder(link) && (extractDriveFileId(link) || link.toLowerCase().endsWith('.pdf'));
+      }) || candidates[0];
 
-    if (!foundRecord) {
+    if (!best) {
       console.log(`📝 No se encontró PDF para: ${email} | ${perfilNormalizado}`);
       return res.status(200).json({
         success: true,
@@ -117,23 +141,18 @@ export default async function handler(req, res) {
       });
     }
 
-    let pdfUrl = foundRecord.get('URL_informePDF');
+    let pdfUrl = best.get('URL_informePDF');
 
-    // Convertir enlaces de Google Drive a formato previsualizable
-    if (pdfUrl.includes('drive.google.com') && pdfUrl.includes('/file/d/')) {
-      const idMatch = pdfUrl.match(/\/d\/([^/]+)\//);
-      if (idMatch?.[1]) {
-        pdfUrl = `https://drive.google.com/file/d/${idMatch[1]}/preview`;
-      }
-    }
+    // Normaliza cualquier enlace de Drive a /preview si es archivo
+    const drivePreview = toDrivePreview(pdfUrl);
+    if (drivePreview) pdfUrl = drivePreview;
 
     console.log(`✅ PDF encontrado: ${pdfUrl}`);
-
     return res.status(200).json({
       success: true,
       found: true,
       urlPDF: pdfUrl,
-      recordId: foundRecord.id,
+      recordId: best.id,
     });
   } catch (err) {
     console.error('❌ Error consultando Airtable:', err?.message || err);
@@ -144,4 +163,3 @@ export default async function handler(req, res) {
     return res.status(500).json({ success: false, error: msg });
   }
 }
-
