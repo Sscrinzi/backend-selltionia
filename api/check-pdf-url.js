@@ -73,7 +73,7 @@ export default async function handler(req, res) {
   try {
     const { apiKey, baseId, tableName: tName } = ensureEnv();
     Airtable.configure({ apiKey });
-    base = new Airtable.Base(baseId);
+    base = new Airtable({ apiKey }).base(baseId);
     tableName = tName;
   } catch (e) {
     console.error('❌ Env error:', e.message);
