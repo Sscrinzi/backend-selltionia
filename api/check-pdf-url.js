@@ -1,96 +1,125 @@
-// api/check-pdf-url.js
+// pages/api/check-pdf-url.js
 import dotenv from 'dotenv';
-import axios from 'axios';
+import Airtable from 'airtable';
 
 dotenv.config();
 
-export default async function handler(req, res) {
-  // ✅ CORS mejorado: siempre antes de todo
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+// ⚠️ Cambia por tu ID real si varía
+const EXTENSION_ID = 'fapmbomkbbckmnpbeecncppfbmcabmbc';
+
+const ALLOWED_ORIGINS = [
+  `chrome-extension://${EXTENSION_ID}`,
+  'http://localhost:3000',
+  'https://backend-selltionia.vercel.app',
+];
+
+function applyCORS(req, res) {
+  const origin = req.headers.origin || '';
+  const allowOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+
+  res.setHeader('Access-Control-Allow-Origin', allowOrigin);
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
   res.setHeader('Access-Control-Max-Age', '86400');
+  // res.setHeader('Access-Control-Allow-Credentials', 'true'); // solo si usas cookies
 
-  // Manejar preflight request
   if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+    res.status(204).end(); // preflight OK
+    return true;
+  }
+  return false;
+}
+
+function normalizeProfileUrl(input) {
+  try {
+    const u = new URL(String(input));
+    u.search = '';
+    u.hash = '';
+    // quitar barra final doble o simple
+    const cleanPath = u.pathname.replace(/\/+$/, '');
+    return `${u.origin}${cleanPath}`.toLowerCase();
+  } catch {
+    return String(input).split('?')[0].replace(/\/+$/, '').toLowerCase();
+  }
+}
+
+function ensureEnv() {
+  const apiKey = process.env.AIRTABLE_API_KEY || process.env.AIRTABLE_TOKEN;
+  const baseId = process.env.AIRTABLE_BASE_ID;
+  const tableName = process.env.AIRTABLE_TABLE_NAME;
+  if (!apiKey || !baseId || !tableName) {
+    throw new Error('Configuración de Airtable incompleta (API_KEY/TOKEN, BASE_ID, TABLE_NAME)');
+  }
+  return { apiKey, baseId, tableName };
+}
+
+export default async function handler(req, res) {
+  if (applyCORS(req, res)) return;
+
+  // ✅ Solo POST con JSON
+  if (req.method !== 'POST') {
+    return res.status(405).json({ success: false, error: 'Método no permitido. Usa POST con JSON.' });
   }
 
-  // Solo permitir GET
-  if (req.method !== 'GET') {
-    return res.status(405).json({
-      success: false,
-      error: 'Método no permitido. Solo GET es aceptado.'
-    });
+  const email = (req.body?.email || '').trim();
+  const urlPerfilRaw = (req.body?.urlPerfil || '').trim();
+
+  if (!email || !urlPerfilRaw) {
+    return res.status(400).json({ success: false, error: 'Faltan parámetros: email y urlPerfil.' });
   }
 
-  const { email, urlPerfil } = req.query;
-
-  // Validación de parámetros
-  if (!email || !urlPerfil) {
-    return res.status(400).json({
-      success: false,
-      error: 'Faltan parámetros: email y urlPerfil son requeridos.',
-    });
-  }
-
-  // Validación de variables de entorno
-  const token = process.env.AIRTABLE_TOKEN;
-  const base = process.env.AIRTABLE_BASE_ID;
-  const table = process.env.AIRTABLE_TABLE_NAME;
-
-  if (!token || !base || !table) {
-    console.error('❌ Variables de entorno faltantes:', { 
-      hasToken: !!token, 
-      hasBase: !!base, 
-      hasTable: !!table 
-    });
-    return res.status(500).json({
-      success: false,
-      error: 'Configuración del servidor incompleta',
-    });
+  let base, tableName;
+  try {
+    const { apiKey, baseId, tableName: tName } = ensureEnv();
+    Airtable.configure({ apiKey });
+    base = new Airtable.Base(baseId);
+    tableName = tName;
+  } catch (e) {
+    console.error('❌ Env error:', e.message);
+    return res.status(500).json({ success: false, error: 'Configuración del servidor incompleta' });
   }
 
   try {
-    console.log(`🔍 Buscando PDF para email: ${email}, URL: ${urlPerfil}`);
-    
-    const url = `https://api.airtable.com/v0/${base}/${encodeURIComponent(table)}`;
+    const perfilNormalizado = normalizeProfileUrl(urlPerfilRaw);
 
-    const response = await axios.get(url, {
-      headers: { 
-        Authorization: `Bearer ${token}`,
-        'User-Agent': 'Selltion-Backend/1.0'
-      },
-      params: {
+    // 1) Intento estricto: filtrar por email desde Airtable (reduce resultados) y luego matchear URL normalizada en Node
+    const records = await base(tableName)
+      .select({
         filterByFormula: `{UsuarioEmail} = '${email}'`,
-        pageSize: 10,
-      },
-      timeout: 15000 // 15 segundos timeout
+        fields: ['UsuarioEmail', 'URLPerfil', 'URL_informePDF'],
+        pageSize: 25,
+      })
+      .all();
+
+    const match = records.find((r) => {
+      const urlAir = normalizeProfileUrl(r.get('URLPerfil') || '');
+      const hasPdf = typeof r.get('URL_informePDF') === 'string' && r.get('URL_informePDF').startsWith('http');
+      return hasPdf && urlAir === perfilNormalizado;
     });
 
-    const perfilActual = urlPerfil.split('?')[0]?.replace(/\/+$/, '');
+    // 2) Fallback (opcional): si no encontró, probamos una coincidencia startsWith (por si Airtable guarda o no el /in/)
+    const matchLoose = match
+      ? match
+      : records.find((r) => {
+          const urlAir = normalizeProfileUrl(r.get('URLPerfil') || '');
+          const hasPdf = typeof r.get('URL_informePDF') === 'string' && r.get('URL_informePDF').startsWith('http');
+          return hasPdf && (urlAir.startsWith(perfilNormalizado) || perfilNormalizado.startsWith(urlAir));
+        });
 
-    const matched = response.data.records.find((r) => {
-      const perfilAirtable = r.fields?.URLPerfil?.split('?')[0]?.replace(/\/+$/, '');
-      const hasValidPDF = r.fields?.URL_informePDF?.startsWith('http');
-      
-      return (
-        r.fields?.UsuarioEmail === email &&
-        perfilAirtable === perfilActual &&
-        hasValidPDF
-      );
-    });
+    const foundRecord = match || matchLoose;
 
-    if (!matched) {
-      console.log(`📝 No se encontró PDF para: ${email} | ${perfilActual}`);
-      return res.status(200).json({ 
-        success: true, 
+    if (!foundRecord) {
+      console.log(`📝 No se encontró PDF para: ${email} | ${perfilNormalizado}`);
+      return res.status(200).json({
+        success: true,
         found: false,
-        message: 'PDF aún no está disponible'
+        urlPDF: null,
+        message: 'PDF aún no está disponible',
       });
     }
 
-    let pdfUrl = matched.fields.URL_informePDF;
+    let pdfUrl = foundRecord.get('URL_informePDF');
 
     // Convertir enlaces de Google Drive a formato previsualizable
     if (pdfUrl.includes('drive.google.com') && pdfUrl.includes('/file/d/')) {
@@ -102,45 +131,18 @@ export default async function handler(req, res) {
 
     console.log(`✅ PDF encontrado: ${pdfUrl}`);
 
-    return res.status(200).json({ 
-      success: true, 
-      found: true, 
-      pdfURL: pdfUrl,
-      recordId: matched.id
+    return res.status(200).json({
+      success: true,
+      found: true,
+      urlPDF: pdfUrl,
+      recordId: foundRecord.id,
     });
-
   } catch (err) {
-    console.error("❌ Error consultando Airtable:", err.message);
-    
-    // Manejo específico de errores
-    if (err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED') {
-      return res.status(503).json({
-        success: false,
-        error: 'Error de conectividad con Airtable',
-        details: 'Servicio temporalmente no disponible'
-      });
+    console.error('❌ Error consultando Airtable:', err?.message || err);
+    const msg = err?.message || 'Error interno';
+    if (msg.includes('ENOTFOUND') || msg.includes('ECONNREFUSED')) {
+      return res.status(503).json({ success: false, error: 'Error de conectividad con Airtable' });
     }
-
-    if (err.response?.status === 401) {
-      return res.status(500).json({
-        success: false,
-        error: 'Error de autenticación con Airtable',
-        details: 'Token inválido'
-      });
-    }
-
-    if (err.response?.status === 429) {
-      return res.status(429).json({
-        success: false,
-        error: 'Límite de solicitudes excedido',
-        details: 'Intenta de nuevo en unos minutos'
-      });
-    }
-
-    return res.status(500).json({
-      success: false,
-      error: 'Error interno del servidor',
-      details: process.env.NODE_ENV === 'development' ? err.message : 'Error desconocido'
-    });
+    return res.status(500).json({ success: false, error: msg });
   }
 }
