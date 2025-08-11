@@ -1,4 +1,4 @@
-// pages/api/check-pdf-url.js
+// api/check-pdf-url.js
 import dotenv from 'dotenv';
 import Airtable from 'airtable';
 
@@ -36,7 +36,6 @@ function normalizeProfileUrl(input) {
     const u = new URL(String(input));
     u.search = '';
     u.hash = '';
-    // quitar barra final doble o simple
     const cleanPath = u.pathname.replace(/\/+$/, '');
     return `${u.origin}${cleanPath}`.toLowerCase();
   } catch {
@@ -69,12 +68,12 @@ export default async function handler(req, res) {
     return res.status(400).json({ success: false, error: 'Faltan parámetros: email y urlPerfil.' });
   }
 
-  let base, tableName;
+  // ✅ INICIALIZACIÓN CORRECTA (tabla directa)
+  let table;
   try {
-    const { apiKey, baseId, tableName: tName } = ensureEnv();
-    Airtable.configure({ apiKey });
-    base = new Airtable({ apiKey }).base(baseId);
-    tableName = tName;
+    const { apiKey, baseId, tableName } = ensureEnv();
+    const airtable = new Airtable({ apiKey });
+    table = airtable.base(baseId)(tableName); // ← obtenemos directamente la tabla
   } catch (e) {
     console.error('❌ Env error:', e.message);
     return res.status(500).json({ success: false, error: 'Configuración del servidor incompleta' });
@@ -83,8 +82,8 @@ export default async function handler(req, res) {
   try {
     const perfilNormalizado = normalizeProfileUrl(urlPerfilRaw);
 
-    // 1) Intento estricto: filtrar por email desde Airtable (reduce resultados) y luego matchear URL normalizada en Node
-    const records = await base(tableName)
+    // Filtramos por email en Airtable y luego matcheamos URL normalizada
+    const records = await table
       .select({
         filterByFormula: `{UsuarioEmail} = '${email}'`,
         fields: ['UsuarioEmail', 'URLPerfil', 'URL_informePDF'],
@@ -98,7 +97,6 @@ export default async function handler(req, res) {
       return hasPdf && urlAir === perfilNormalizado;
     });
 
-    // 2) Fallback (opcional): si no encontró, probamos una coincidencia startsWith (por si Airtable guarda o no el /in/)
     const matchLoose = match
       ? match
       : records.find((r) => {
@@ -146,3 +144,4 @@ export default async function handler(req, res) {
     return res.status(500).json({ success: false, error: msg });
   }
 }
+
