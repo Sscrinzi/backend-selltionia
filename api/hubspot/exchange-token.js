@@ -2,12 +2,31 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-const EXTENSION_ID = 'fapmbomkbbckmnpbeecncppfbmcabmbc';
-const ALLOWED_ORIGINS = [
-  `chrome-extension://${EXTENSION_ID}`,
+// --- CORS: permitir extensión de PROD + TEST sin tocar código ---
+const DEFAULT_EXTENSION_IDS = [
+  'eilckjfihngldoedpfdnhpponpbaphig', // PROD (Chrome Web Store)
+  'fapmbomkbbckmnpbeecncppfbmcabmbc', // TEST (modo dev)
+];
+
+const EXTENSION_IDS = (process.env.EXTENSION_IDS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+const EFFECTIVE_IDS = EXTENSION_IDS.length ? EXTENSION_IDS : DEFAULT_EXTENSION_IDS;
+
+const EXTENSION_ORIGINS = Array.from(
+  new Set(EFFECTIVE_IDS.map(id => `chrome-extension://${id}`))
+);
+
+// Orígenes extra que ya permitías
+const STATIC_ORIGINS = [
   'http://localhost:3000',
   'https://backend-selltionia.vercel.app',
 ];
+
+// Lista final de orígenes permitidos
+const ALLOWED_ORIGINS = Array.from(new Set([...EXTENSION_ORIGINS, ...STATIC_ORIGINS]));
 
 function cors(req, res) {
   const origin = req.headers.origin || '';

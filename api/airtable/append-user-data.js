@@ -4,13 +4,31 @@ import Airtable from 'airtable';
 
 dotenv.config();
 
-const EXTENSION_ID = 'fapmbomkbbckmnpbeecncppfbmcabmbc'; // ajusta si cambia
+// --- CORS: permitir extensión de PROD + TEST sin tocar código ---
+const DEFAULT_EXTENSION_IDS = [
+  'eilckjfihngldoedpfdnhpponpbaphig', // PROD (Chrome Web Store)
+  'fapmbomkbbckmnpbeecncppfbmcabmbc', // TEST (modo dev)
+];
 
-const ALLOWED_ORIGINS = [
-  `chrome-extension://${EXTENSION_ID}`,
+const EXTENSION_IDS = (process.env.EXTENSION_IDS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+const EFFECTIVE_IDS = EXTENSION_IDS.length ? EXTENSION_IDS : DEFAULT_EXTENSION_IDS;
+
+const EXTENSION_ORIGINS = Array.from(
+  new Set(EFFECTIVE_IDS.map(id => `chrome-extension://${id}`))
+);
+
+// Orígenes extra que ya permitías
+const STATIC_ORIGINS = [
   'http://localhost:3000',
   'https://backend-selltionia.vercel.app',
 ];
+
+// Lista final de orígenes permitidos
+const ALLOWED_ORIGINS = Array.from(new Set([...EXTENSION_ORIGINS, ...STATIC_ORIGINS]));
 
 function applyCORS(req, res) {
   const origin = req.headers.origin || '';
